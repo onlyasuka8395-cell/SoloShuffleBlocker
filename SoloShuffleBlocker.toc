@@ -2,7 +2,7 @@
 ## Title: Solo Shuffle Blocker
 ## Notes: Blocks chat from all players in Solo Shuffle and unblocks them 5 minutes after leaving.
 ## Author: Antigravity
-## Version: 1.1
+## Version: 1.1.2
 ## SavedVariables: SSBlockerDB
 ## X-Curse-Project-ID: 1514894
 

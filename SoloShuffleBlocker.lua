@@ -124,50 +124,72 @@ local function BlockCurrentPlayers()
     if not inSoloShuffle then return end
     if SSBlockerDB and SSBlockerDB.enabled == false then return end
 
-    local numScores = GetNumScores()
+    -- 서버에 점수판 데이터 갱신 요청
+    if RequestBattlefieldScoreData then
+        RequestBattlefieldScoreData()
+    end
+
     local myName, myRealm = UnitName("player")
     if not myRealm then myRealm = GetRealmName() end
     local myFullName = myName .. "-" .. myRealm
     
+    local function TryBlock(name, guid)
+        -- 이름이 없거나 '알 수 없음'인 경우 무시
+        if not name or name == "" or name == UNKNOWN or name == UNKNOWNOBJECT or name == "Unknown" or name == "알 수 없음" then 
+            return 
+        end
+        
+        if name ~= myName and name ~= myFullName then
+            -- 길드원 여부 확인
+            local isGuild = IsSameGuild(guid)
+            
+            if not isGuild then
+                -- 이미 차단된 사용자인지 확인
+                if not C_FriendList.IsIgnored(name) then
+                    local success = C_FriendList.AddIgnore(name)
+                    
+                    if not success and #GetBlockedQueue() > 0 then
+                        local numIgnores = C_FriendList.GetNumIgnores and C_FriendList.GetNumIgnores() or 0
+                        if numIgnores >= 40 then
+                            UnblockOldest(6)
+                            success = C_FriendList.AddIgnore(name)
+                        end
+                    end
+
+                    if success then
+                        local dict = GetBlockedDict()
+                        local queue = GetBlockedQueue()
+                        if not dict[name] then
+                            dict[name] = true
+                            table.insert(queue, name)
+                        end
+                        -- Print(name .. " 차단됨 (임시).")
+                    end
+                end
+            end
+        end
+    end
+
+    -- 1. 점수판 정보를 통해 차단 시도
+    local numScores = GetNumScores()
     for i = 1, numScores do
         local scoreInfo = C_PvP.GetScoreInfo(i)
         if scoreInfo and scoreInfo.name then
-            local name = scoreInfo.name
-            -- Ensure name has realm if possible, or handle based on return format
-            -- C_PvP.GetScoreInfo usually returns Name-Realm or Name if local.
-            -- We will try to ignore exactly what is returned.
-            
-            if name ~= myName and name ~= myFullName then
-                -- Check if guild member
-                local isGuild = IsSameGuild(scoreInfo.guid)
-                
-                if not isGuild then
-                    -- Check if already ignored permanently by the user
-                    if not C_FriendList.IsIgnored(name) then
-                        -- Not ignored yet, so we block and track it
-                        local success = C_FriendList.AddIgnore(name)
-                        
-                        if not success and #GetBlockedQueue() > 0 then
-                            local numIgnores = C_FriendList.GetNumIgnores and C_FriendList.GetNumIgnores() or 0
-                            if numIgnores >= 40 then
-                                UnblockOldest(6)
-                                success = C_FriendList.AddIgnore(name)
-                            end
-                        end
+            TryBlock(scoreInfo.name, scoreInfo.guid)
+        end
+    end
 
-                        if success then
-                            local dict = GetBlockedDict()
-                            local queue = GetBlockedQueue()
-                            if not dict[name] then
-                                dict[name] = true
-                                table.insert(queue, name)
-                            end
-                            -- Print(name .. " 차단됨 (임시).") -- Optional: Reduce spam
-                        end
-                    else
-                        -- Already ignored, do not track (so we don't unblock them later)
-                    end
+    -- 2. 폴백: arena1~6 유닛 정보를 통해 차단 시도 (점수판 로드가 늦을 경우 대비)
+    for i = 1, 6 do
+        local unit = "arena" .. i
+        if UnitExists(unit) then
+            local name, realm = UnitName(unit)
+            if name and name ~= "" then
+                local fullName = name
+                if realm and realm ~= "" then
+                    fullName = name .. "-" .. realm
                 end
+                TryBlock(fullName, UnitGUID(unit))
             end
         end
     end
@@ -209,12 +231,15 @@ local function OnEvent(self, event, ...)
             
             UpdateGuildCache() -- Cache guild members to avoid blocking them
             
-            -- Try to block immediately and periodically (players might load in slowly)
+            -- 플레이어가 천천히 로드될 수 있으므로 여러 번 시도합니다.
             if SSBlockerDB and SSBlockerDB.enabled then
                 BlockCurrentPlayers()
+                C_Timer.After(2, BlockCurrentPlayers)
                 C_Timer.After(5, BlockCurrentPlayers)
+                C_Timer.After(10, BlockCurrentPlayers)
                 C_Timer.After(15, BlockCurrentPlayers)
-                C_Timer.After(30, BlockCurrentPlayers) -- Final check
+                C_Timer.After(30, BlockCurrentPlayers)
+                C_Timer.After(60, BlockCurrentPlayers) -- 만약을 위한 마지막 확인
             end
             
         elseif not isSoloShuffle and inSoloShuffle then

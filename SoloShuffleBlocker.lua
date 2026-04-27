@@ -129,11 +129,15 @@ local function TryBlockPlayer(name, guid)
         local myName, myRealm = UnitName("player")
         if not myRealm or myRealm == "" then myRealm = GetRealmName() end
         
-        -- Remove spaces from realm name for comparison if needed
-        local cleanMyRealm = myRealm:gsub("%s+", "")
-        local myFullName = myName .. "-" .. cleanMyRealm
+        -- Remove spaces and dashes from realm name for consistent comparison
+        local cleanMyRealm = myRealm:gsub("[%s%-]+", "")
+        local myFullName = (myName .. "-" .. cleanMyRealm):lower()
 
-        if name == myName or name == myFullName or name:gsub("%s+", "") == myFullName then return end
+        local targetFullName = name:gsub("[%s%-]+", "-"):lower()
+        local targetNameOnly = name:match("([^-]+)") or name
+        targetNameOnly = targetNameOnly:lower()
+
+        if targetNameOnly == myName:lower() or targetFullName == myFullName then return end
 
         -- Check if guild member
         if IsSameGuild(guid) then return end
@@ -181,12 +185,9 @@ local function BlockFromGroup()
             for i = 1, numGroup do
                 local unit = "raid" .. i
                 if UnitExists(unit) and not UnitIsUnit(unit, "player") then
-                    local name, realm = UnitName(unit)
+                    local name = GetUnitName(unit, true)
+                    local guid = UnitGUID(unit)
                     if name then
-                        if realm and realm ~= "" then
-                            name = name .. "-" .. realm
-                        end
-                        local guid = UnitGUID(unit)
                         TryBlockPlayer(name, guid)
                     end
                 end
@@ -196,12 +197,9 @@ local function BlockFromGroup()
             for i = 1, numGroup do
                 local unit = "party" .. i
                 if UnitExists(unit) then
-                    local name, realm = UnitName(unit)
+                    local name = GetUnitName(unit, true)
+                    local guid = UnitGUID(unit)
                     if name then
-                        if realm and realm ~= "" then
-                            name = name .. "-" .. realm
-                        end
-                        local guid = UnitGUID(unit)
                         TryBlockPlayer(name, guid)
                     end
                 end
@@ -212,12 +210,9 @@ local function BlockFromGroup()
         for i = 1, 6 do
             local unit = "arena" .. i
             if UnitExists(unit) then
-                local name, realm = UnitName(unit)
+                local name = GetUnitName(unit, true)
+                local guid = UnitGUID(unit)
                 if name then
-                    if realm and realm ~= "" then
-                        name = name .. "-" .. realm
-                    end
-                    local guid = UnitGUID(unit)
                     TryBlockPlayer(name, guid)
                 end
             end
@@ -331,6 +326,13 @@ local function OnEvent(self, event, ...)
             end
             if destName and destGUID then
                 TryBlockPlayer(destName, destGUID)
+            end
+        end
+    elseif event == "CHAT_MSG_INSTANCE_CHAT" or event == "CHAT_MSG_INSTANCE_CHAT_LEADER" or event == "CHAT_MSG_PARTY" or event == "CHAT_MSG_PARTY_LEADER" or event == "CHAT_MSG_SAY" then
+        if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
+            local _, sender, _, _, _, _, _, _, _, _, _, guid = ...
+            if sender and guid then
+                TryBlockPlayer(sender, guid)
             end
         end
     end
@@ -485,4 +487,9 @@ frame:RegisterEvent("GROUP_ROSTER_UPDATE")
 frame:RegisterEvent("ARENA_OPPONENT_UPDATE")
 frame:RegisterEvent("ARENA_PREP_OPPONENT_SPECIALIZATIONS")
 frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+frame:RegisterEvent("CHAT_MSG_INSTANCE_CHAT")
+frame:RegisterEvent("CHAT_MSG_INSTANCE_CHAT_LEADER")
+frame:RegisterEvent("CHAT_MSG_PARTY")
+frame:RegisterEvent("CHAT_MSG_PARTY_LEADER")
+frame:RegisterEvent("CHAT_MSG_SAY")
 frame:SetScript("OnEvent", OnEvent)

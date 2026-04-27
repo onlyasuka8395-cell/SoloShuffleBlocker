@@ -121,98 +121,129 @@ end
 
 -- Helper to attempt blocking a single player by name and guid
 local function TryBlockPlayer(name, guid)
-    if not name or name == "" or name == UNKNOWN or name == "Unknown" or name == "알 수 없음" then return end
-    if not inSoloShuffle then return end
-    if SSBlockerDB and SSBlockerDB.enabled == false then return end
+    local ok, err = pcall(function()
+        if not name or name == "" or name == UNKNOWN or name == "Unknown" or name == "알 수 없음" then return end
+        if not inSoloShuffle then return end
+        if SSBlockerDB and SSBlockerDB.enabled == false then return end
 
-    local myName, myRealm = UnitName("player")
-    if not myRealm then myRealm = GetRealmName() end
-    local myFullName = myName .. "-" .. myRealm
+        local myName, myRealm = UnitName("player")
+        if not myRealm or myRealm == "" then myRealm = GetRealmName() end
+        
+        -- Remove spaces from realm name for comparison if needed
+        local cleanMyRealm = myRealm:gsub("%s+", "")
+        local myFullName = myName .. "-" .. cleanMyRealm
 
-    if name == myName or name == myFullName then return end
+        if name == myName or name == myFullName or name:gsub("%s+", "") == myFullName then return end
 
-    -- Check if guild member
-    if IsSameGuild(guid) then return end
+        -- Check if guild member
+        if IsSameGuild(guid) then return end
 
-    -- Check if friend
-    if name and C_FriendList.IsFriend(name) then return end
+        -- Check if friend
+        if name and C_FriendList.IsFriend(name) then return end
 
-    -- Check if already ignored permanently by the user
-    if C_FriendList.IsIgnored(name) then return end
+        -- Check if already ignored permanently by the user
+        if C_FriendList.IsIgnored(name) then return end
 
-    local dict = GetBlockedDict()
-    if dict[name] then return end -- Already tracked by us
+        local dict = GetBlockedDict()
+        if dict[name] then return end -- Already tracked by us
 
-    local success = C_FriendList.AddIgnore(name)
+        local success = C_FriendList.AddIgnore(name)
 
-    if not success and #GetBlockedQueue() > 0 then
-        local numIgnores = C_FriendList.GetNumIgnores and C_FriendList.GetNumIgnores() or 0
-        if numIgnores >= 40 then
-            UnblockOldest(6)
-            success = C_FriendList.AddIgnore(name)
+        if not success and #GetBlockedQueue() > 0 then
+            local numIgnores = C_FriendList.GetNumIgnores and C_FriendList.GetNumIgnores() or 0
+            if numIgnores >= 40 then
+                UnblockOldest(6)
+                success = C_FriendList.AddIgnore(name)
+            end
         end
-    end
 
-    if success then
-        local queue = GetBlockedQueue()
-        dict[name] = true
-        table.insert(queue, name)
+        if success then
+            local queue = GetBlockedQueue()
+            dict[name] = true
+            table.insert(queue, name)
+            -- Print("차단 성공: " .. name) -- Debug
+        end
+    end)
+    if not ok then
+        -- Silent error to avoid UI popup, but could print for debug if needed
+        -- Print("Error in TryBlockPlayer: " .. tostring(err))
     end
 end
 
 -- Block players using group roster (works at match start)
 local function BlockFromGroup()
-    if not inSoloShuffle then return end
-    if SSBlockerDB and SSBlockerDB.enabled == false then return end
+    local ok, err = pcall(function()
+        if not inSoloShuffle then return end
+        if SSBlockerDB and SSBlockerDB.enabled == false then return end
 
-    local numGroup = GetNumGroupMembers()
-    for i = 1, numGroup do
-        local unit = (IsInRaid() and "raid" or "party") .. i
-        if UnitExists(unit) and not UnitIsUnit(unit, "player") then
-            local name, realm = UnitName(unit)
-            if name then
-                if realm and realm ~= "" then
-                    name = name .. "-" .. realm
+        if IsInRaid() then
+            local numGroup = GetNumGroupMembers()
+            for i = 1, numGroup do
+                local unit = "raid" .. i
+                if UnitExists(unit) and not UnitIsUnit(unit, "player") then
+                    local name, realm = UnitName(unit)
+                    if name then
+                        if realm and realm ~= "" then
+                            name = name .. "-" .. realm
+                        end
+                        local guid = UnitGUID(unit)
+                        TryBlockPlayer(name, guid)
+                    end
                 end
-                local guid = UnitGUID(unit)
-                TryBlockPlayer(name, guid)
+            end
+        else
+            local numGroup = GetNumSubgroupMembers()
+            for i = 1, numGroup do
+                local unit = "party" .. i
+                if UnitExists(unit) then
+                    local name, realm = UnitName(unit)
+                    if name then
+                        if realm and realm ~= "" then
+                            name = name .. "-" .. realm
+                        end
+                        local guid = UnitGUID(unit)
+                        TryBlockPlayer(name, guid)
+                    end
+                end
             end
         end
-    end
 
-    -- Also try arena opponent units (arena1 ~ arena6)
-    for i = 1, 6 do
-        local unit = "arena" .. i
-        if UnitExists(unit) then
-            local name, realm = UnitName(unit)
-            if name then
-                if realm and realm ~= "" then
-                    name = name .. "-" .. realm
+        -- Also try arena opponent units (arena1 ~ arena6)
+        for i = 1, 6 do
+            local unit = "arena" .. i
+            if UnitExists(unit) then
+                local name, realm = UnitName(unit)
+                if name then
+                    if realm and realm ~= "" then
+                        name = name .. "-" .. realm
+                    end
+                    local guid = UnitGUID(unit)
+                    TryBlockPlayer(name, guid)
                 end
-                local guid = UnitGUID(unit)
-                TryBlockPlayer(name, guid)
             end
         end
-    end
+    end)
 end
 
 -- Block using scoreboard (fallback, works at match end)
 local function BlockFromScoreboard()
-    if not inSoloShuffle then return end
-    if SSBlockerDB and SSBlockerDB.enabled == false then return end
+    local ok, err = pcall(function()
+        if not inSoloShuffle then return end
+        if SSBlockerDB and SSBlockerDB.enabled == false then return end
 
-    -- Request data update
-    if RequestBattlefieldScoreData then
-        RequestBattlefieldScoreData()
-    end
-
-    local numScores = GetNumScores()
-    for i = 1, numScores do
-        local scoreInfo = C_PvP.GetScoreInfo(i)
-        if scoreInfo and scoreInfo.name then
-            TryBlockPlayer(scoreInfo.name, scoreInfo.guid)
+        -- Request data update
+        if RequestBattlefieldScoreData then
+            RequestBattlefieldScoreData()
         end
-    end
+
+        local numScores = GetNumScores()
+        for i = 1, numScores do
+            local scoreInfo = C_PvP.GetScoreInfo(i)
+            if scoreInfo and scoreInfo.name then
+                TryBlockPlayer(scoreInfo.name, scoreInfo.guid)
+            end
+        end
+    end)
 end
 
 local function OnEvent(self, event, ...)
@@ -224,13 +255,15 @@ local function OnEvent(self, event, ...)
             SSBlockerDB.blockedQueue = SSBlockerDB.blockedQueue or {}
             if SSBlockerDB.enabled == nil then SSBlockerDB.enabled = true end
             
-            if SSBlockerDB.buttonPoint then
-                toggleButton:ClearAllPoints()
-                toggleButton:SetPoint(SSBlockerDB.buttonPoint, UIParent, SSBlockerDB.buttonPoint, SSBlockerDB.buttonX, SSBlockerDB.buttonY)
-            else
-                toggleButton:SetPoint("TOP", UIParent, "TOP", 0, -100)
+            if toggleButton then
+                if SSBlockerDB.buttonPoint then
+                    toggleButton:ClearAllPoints()
+                    toggleButton:SetPoint(SSBlockerDB.buttonPoint, UIParent, SSBlockerDB.buttonPoint, SSBlockerDB.buttonX, SSBlockerDB.buttonY)
+                else
+                    toggleButton:SetPoint("TOP", UIParent, "TOP", 0, -100)
+                end
+                UpdateButtonState()
             end
-            UpdateButtonState()
         end
     elseif event == "PLAYER_ENTERING_WORLD" or event == "UPDATE_BATTLEFIELD_STATUS" then
         local isSoloShuffle = (C_PvP.IsRatedSoloShuffle and C_PvP.IsRatedSoloShuffle()) or (C_PvP.IsSoloShuffle and C_PvP.IsSoloShuffle())
@@ -254,11 +287,12 @@ local function OnEvent(self, event, ...)
             -- Try to block immediately and periodically (players might load in slowly)
             if SSBlockerDB and SSBlockerDB.enabled then
                 BlockFromGroup()
-                C_Timer.After(2, BlockFromGroup)
+                C_Timer.After(1, BlockFromGroup)
+                C_Timer.After(3, BlockFromGroup)
                 C_Timer.After(5, BlockFromGroup)
                 C_Timer.After(10, BlockFromGroup)
                 C_Timer.After(20, BlockFromGroup)
-                C_Timer.After(40, BlockFromGroup)
+                C_Timer.After(30, BlockFromGroup)
                 C_Timer.After(60, BlockFromGroup)
             end
             
@@ -281,13 +315,23 @@ local function OnEvent(self, event, ...)
             end
         end
         
-    elseif event == "GROUP_ROSTER_UPDATE" or event == "ARENA_OPPONENT_UPDATE" then
+    elseif event == "GROUP_ROSTER_UPDATE" or event == "ARENA_OPPONENT_UPDATE" or event == "ARENA_PREP_OPPONENT_SPECIALIZATIONS" then
         if inSoloShuffle then
             BlockFromGroup()
         end
     elseif event == "UPDATE_BATTLEFIELD_SCORE" then
         if inSoloShuffle then
             BlockFromScoreboard()
+        end
+    elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
+        if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
+            local timestamp, subevent, hideCaster, sourceGUID, sourceName, sourceFlags, sourceRaidFlags, destGUID, destName, destFlags, destRaidFlags = CombatLogGetCurrentEventInfo()
+            if sourceName and sourceGUID then
+                TryBlockPlayer(sourceName, sourceGUID)
+            end
+            if destName and destGUID then
+                TryBlockPlayer(destName, destGUID)
+            end
         end
     end
 end
@@ -439,4 +483,6 @@ frame:RegisterEvent("UPDATE_BATTLEFIELD_STATUS")
 frame:RegisterEvent("UPDATE_BATTLEFIELD_SCORE")
 frame:RegisterEvent("GROUP_ROSTER_UPDATE")
 frame:RegisterEvent("ARENA_OPPONENT_UPDATE")
+frame:RegisterEvent("ARENA_PREP_OPPONENT_SPECIALIZATIONS")
+frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 frame:SetScript("OnEvent", OnEvent)

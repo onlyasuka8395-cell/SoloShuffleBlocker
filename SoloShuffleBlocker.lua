@@ -145,7 +145,7 @@ local function TryBlockPlayer(name, guid)
         if IsSameGuild(guid) then return end
 
         -- Check if friend
-        if C_FriendList.IsFriend(cleanName) then return end
+        if guid and C_FriendList.IsFriend(guid) then return end
 
         -- Check if already ignored permanently by the user
         if C_FriendList.IsIgnored(cleanName) then return end
@@ -170,8 +170,7 @@ local function TryBlockPlayer(name, guid)
         end
     end)
     if not ok then
-        -- Silent error to avoid UI popup, but could print for debug if needed
-        -- Print("Error in TryBlockPlayer: " .. tostring(err))
+        Print("Error in TryBlockPlayer ("..tostring(name).."): " .. tostring(err))
     end
 end
 

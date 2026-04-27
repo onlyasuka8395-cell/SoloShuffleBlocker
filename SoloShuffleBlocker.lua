@@ -126,6 +126,8 @@ local function TryBlockPlayer(name, guid)
         if not inSoloShuffle then return end
         if SSBlockerDB and SSBlockerDB.enabled == false then return end
 
+        local cleanName = name:gsub("%s+", "")
+
         local myName, myRealm = UnitName("player")
         if not myRealm or myRealm == "" then myRealm = GetRealmName() end
         
@@ -133,8 +135,8 @@ local function TryBlockPlayer(name, guid)
         local cleanMyRealm = myRealm:gsub("[%s%-]+", "")
         local myFullName = (myName .. "-" .. cleanMyRealm):lower()
 
-        local targetFullName = name:gsub("[%s%-]+", "-"):lower()
-        local targetNameOnly = name:match("([^-]+)") or name
+        local targetFullName = cleanName:gsub("[%s%-]+", "-"):lower()
+        local targetNameOnly = cleanName:match("([^-]+)") or cleanName
         targetNameOnly = targetNameOnly:lower()
 
         if targetNameOnly == myName:lower() or targetFullName == myFullName then return end
@@ -143,29 +145,28 @@ local function TryBlockPlayer(name, guid)
         if IsSameGuild(guid) then return end
 
         -- Check if friend
-        if name and C_FriendList.IsFriend(name) then return end
+        if C_FriendList.IsFriend(cleanName) then return end
 
         -- Check if already ignored permanently by the user
-        if C_FriendList.IsIgnored(name) then return end
+        if C_FriendList.IsIgnored(cleanName) then return end
 
         local dict = GetBlockedDict()
-        if dict[name] then return end -- Already tracked by us
+        if dict[cleanName] then return end -- Already tracked by us
 
-        local success = C_FriendList.AddIgnore(name)
-
-        if not success and #GetBlockedQueue() > 0 then
-            local numIgnores = C_FriendList.GetNumIgnores and C_FriendList.GetNumIgnores() or 0
-            if numIgnores >= 40 then
-                UnblockOldest(6)
-                success = C_FriendList.AddIgnore(name)
-            end
+        local numIgnores = C_FriendList.GetNumIgnores and C_FriendList.GetNumIgnores() or 0
+        if numIgnores >= 40 and #GetBlockedQueue() > 0 then
+            UnblockOldest(6)
         end
 
-        if success then
-            local queue = GetBlockedQueue()
-            dict[name] = true
-            table.insert(queue, name)
-            -- Print("차단 성공: " .. name) -- Debug
+        C_FriendList.AddIgnore(cleanName)
+        
+        local queue = GetBlockedQueue()
+        dict[cleanName] = true
+        table.insert(queue, cleanName)
+        Print("차단됨: " .. cleanName)
+        
+        if UpdateBlockListDisplay then
+            UpdateBlockListDisplay()
         end
     end)
     if not ok then
@@ -328,6 +329,17 @@ local function OnEvent(self, event, ...)
                 TryBlockPlayer(destName, destGUID)
             end
         end
+    elseif event == "CHAT_MSG_SYSTEM" then
+        if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
+            local msg = ...
+            if msg then
+                local name = msg:match("^([^%s]+).*님이.*합류")
+                if name then
+                    name = name:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+                    TryBlockPlayer(name, nil)
+                end
+            end
+        end
     elseif event == "CHAT_MSG_INSTANCE_CHAT" or event == "CHAT_MSG_INSTANCE_CHAT_LEADER" or event == "CHAT_MSG_PARTY" or event == "CHAT_MSG_PARTY_LEADER" or event == "CHAT_MSG_SAY" then
         if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
             local _, sender, _, _, _, _, _, _, _, _, _, guid = ...
@@ -487,6 +499,7 @@ frame:RegisterEvent("GROUP_ROSTER_UPDATE")
 frame:RegisterEvent("ARENA_OPPONENT_UPDATE")
 frame:RegisterEvent("ARENA_PREP_OPPONENT_SPECIALIZATIONS")
 frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+frame:RegisterEvent("CHAT_MSG_SYSTEM")
 frame:RegisterEvent("CHAT_MSG_INSTANCE_CHAT")
 frame:RegisterEvent("CHAT_MSG_INSTANCE_CHAT_LEADER")
 frame:RegisterEvent("CHAT_MSG_PARTY")

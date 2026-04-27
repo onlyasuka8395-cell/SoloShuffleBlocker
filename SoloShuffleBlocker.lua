@@ -141,6 +141,9 @@ local function TryBlockPlayer(name, guid)
 
         if targetNameOnly == myName:lower() or targetFullName == myFullName then return end
 
+        -- Ensure we only block players (skip pets/NPCs)
+        if guid and not string.match(guid, "^Player%-") then return end
+
         -- Check if guild member
         if IsSameGuild(guid) then return end
 
@@ -169,9 +172,10 @@ local function TryBlockPlayer(name, guid)
             UpdateBlockListDisplay()
         end
     end)
-    if not ok then
-        Print("Error in TryBlockPlayer ("..tostring(name).."): " .. tostring(err))
-    end
+    -- 에러 메시지 주석 처리 (스팸 방지)
+    -- if not ok then
+    --     Print("Error in TryBlockPlayer ("..tostring(name).."): " .. tostring(err))
+    -- end
 end
 
 -- Block players using group roster (works at match start)
@@ -321,10 +325,10 @@ local function OnEvent(self, event, ...)
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
         if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
             local timestamp, subevent, hideCaster, sourceGUID, sourceName, sourceFlags, sourceRaidFlags, destGUID, destName, destFlags, destRaidFlags = CombatLogGetCurrentEventInfo()
-            if sourceName and sourceGUID then
+            if sourceName and sourceGUID and string.match(sourceGUID, "^Player%-") then
                 TryBlockPlayer(sourceName, sourceGUID)
             end
-            if destName and destGUID then
+            if destName and destGUID and string.match(destGUID, "^Player%-") then
                 TryBlockPlayer(destName, destGUID)
             end
         end

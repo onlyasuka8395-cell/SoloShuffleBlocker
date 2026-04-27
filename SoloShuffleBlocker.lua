@@ -128,6 +128,9 @@ local function TryBlockPlayer(name, guid)
 
         local cleanName = name:gsub("%s+", "")
 
+        local dict = GetBlockedDict()
+        if dict[cleanName] then return end -- Already tracked by us
+
         local myName, myRealm = UnitName("player")
         if not myRealm or myRealm == "" then myRealm = GetRealmName() end
         
@@ -152,9 +155,6 @@ local function TryBlockPlayer(name, guid)
 
         -- Check if already ignored permanently by the user
         if C_FriendList.IsIgnored(cleanName) then return end
-
-        local dict = GetBlockedDict()
-        if dict[cleanName] then return end -- Already tracked by us
 
         local numIgnores = C_FriendList.GetNumIgnores and C_FriendList.GetNumIgnores() or 0
         if numIgnores >= 40 and #GetBlockedQueue() > 0 then
@@ -321,16 +321,6 @@ local function OnEvent(self, event, ...)
     elseif event == "UPDATE_BATTLEFIELD_SCORE" then
         if inSoloShuffle then
             BlockFromScoreboard()
-        end
-    elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
-        if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
-            local timestamp, subevent, hideCaster, sourceGUID, sourceName, sourceFlags, sourceRaidFlags, destGUID, destName, destFlags, destRaidFlags = CombatLogGetCurrentEventInfo()
-            if sourceName and sourceGUID and string.match(sourceGUID, "^Player%-") then
-                TryBlockPlayer(sourceName, sourceGUID)
-            end
-            if destName and destGUID and string.match(destGUID, "^Player%-") then
-                TryBlockPlayer(destName, destGUID)
-            end
         end
     elseif event == "CHAT_MSG_SYSTEM" then
         if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
@@ -501,7 +491,6 @@ frame:RegisterEvent("UPDATE_BATTLEFIELD_SCORE")
 frame:RegisterEvent("GROUP_ROSTER_UPDATE")
 frame:RegisterEvent("ARENA_OPPONENT_UPDATE")
 frame:RegisterEvent("ARENA_PREP_OPPONENT_SPECIALIZATIONS")
-frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 frame:RegisterEvent("CHAT_MSG_SYSTEM")
 frame:RegisterEvent("CHAT_MSG_INSTANCE_CHAT")
 frame:RegisterEvent("CHAT_MSG_INSTANCE_CHAT_LEADER")

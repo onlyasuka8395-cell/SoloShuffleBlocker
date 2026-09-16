@@ -8,6 +8,13 @@ local optionsPanel
 local UpdateBlockListDisplay
 local toggleButton
 
+local function IsSecret(val)
+    if issecretvalue then
+        return issecretvalue(val)
+    end
+    return false
+end
+
 local function UpdateButtonVisibility()
     if toggleButton then
         if inSoloShuffle or isTestMode then
@@ -121,6 +128,7 @@ end
 
 -- Helper to attempt blocking a single player by name and guid
 local function TryBlockPlayer(name, guid)
+    if IsSecret(name) or IsSecret(guid) then return end
     local ok, err = pcall(function()
         if not name or name == "" or name == UNKNOWN or name == "Unknown" or name == "알 수 없음" then return end
         if not inSoloShuffle then return end
@@ -325,18 +333,20 @@ local function OnEvent(self, event, ...)
     elseif event == "CHAT_MSG_SYSTEM" then
         if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
             local msg = ...
-            if msg then
-                local name = msg:match("^([^%s]+).*님이.*합류")
-                if name then
-                    name = name:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
-                    TryBlockPlayer(name, nil)
-                end
+            if msg and not IsSecret(msg) and type(msg) == "string" then
+                pcall(function()
+                    local name = msg:match("^([^%s]+).*님이.*합류")
+                    if name and not IsSecret(name) then
+                        name = name:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+                        TryBlockPlayer(name, nil)
+                    end
+                end)
             end
         end
     elseif event == "CHAT_MSG_INSTANCE_CHAT" or event == "CHAT_MSG_INSTANCE_CHAT_LEADER" or event == "CHAT_MSG_PARTY" or event == "CHAT_MSG_PARTY_LEADER" or event == "CHAT_MSG_SAY" then
         if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
             local _, sender, _, _, _, _, _, _, _, _, _, guid = ...
-            if sender and guid then
+            if sender and guid and not IsSecret(sender) and not IsSecret(guid) then
                 TryBlockPlayer(sender, guid)
             end
         end

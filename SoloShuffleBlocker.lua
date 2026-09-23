@@ -46,20 +46,21 @@ local function GetBlockedDict()
     return SSBlockerDB.blockedDict
 end
 
+local function GetBlockedCount()
+    local count = 0
+    local dict = GetBlockedDict()
+    for _ in pairs(dict) do
+        count = count + 1
+    end
+    return count
+end
+
 -- Helper to safely get the number of scoreboard entries
 local function GetNumScores()
     if GetNumBattlefieldScores then
         return GetNumBattlefieldScores()
-    elseif C_PvP and C_PvP.GetActiveMatchScoreboard then
-        local sb = C_PvP.GetActiveMatchScoreboard()
-        return sb and #sb or 0
-    else
-        local count = 0
-        while C_PvP and C_PvP.GetScoreInfo(count + 1) do
-            count = count + 1
-        end
-        return count
     end
+    return 0
 end
 
 -- Helper to print messages
@@ -187,11 +188,17 @@ local function TryBlockPlayer(name, guid)
 end
 
 -- Block players using group roster (works at match start)
-local function BlockFromGroup()
-    local ok, err = pcall(function()
-        if not inSoloShuffle then return end
-        if SSBlockerDB and SSBlockerDB.enabled == false then return end
+local lastGroupScan = 0
+local function BlockFromGroup(force)
+    if not inSoloShuffle then return end
+    if SSBlockerDB and SSBlockerDB.enabled == false then return end
+    if GetBlockedCount() >= 5 then return end
 
+    local now = GetTime()
+    if not force and (now - lastGroupScan < 0.5) then return end
+    lastGroupScan = now
+
+    pcall(function()
         if IsInRaid() then
             local numGroup = GetNumGroupMembers()
             for i = 1, numGroup do
@@ -201,6 +208,7 @@ local function BlockFromGroup()
                     local guid = UnitGUID(unit)
                     if name then
                         TryBlockPlayer(name, guid)
+                        if GetBlockedCount() >= 5 then return end
                     end
                 end
             end
@@ -213,6 +221,7 @@ local function BlockFromGroup()
                     local guid = UnitGUID(unit)
                     if name then
                         TryBlockPlayer(name, guid)
+                        if GetBlockedCount() >= 5 then return end
                     end
                 end
             end
@@ -226,6 +235,7 @@ local function BlockFromGroup()
                 local guid = UnitGUID(unit)
                 if name then
                     TryBlockPlayer(name, guid)
+                    if GetBlockedCount() >= 5 then return end
                 end
             end
         end
@@ -233,21 +243,24 @@ local function BlockFromGroup()
 end
 
 -- Block using scoreboard (fallback, works at match end)
+local lastScoreScan = 0
 local function BlockFromScoreboard()
-    local ok, err = pcall(function()
-        if not inSoloShuffle then return end
-        if SSBlockerDB and SSBlockerDB.enabled == false then return end
+    if not inSoloShuffle then return end
+    if SSBlockerDB and SSBlockerDB.enabled == false then return end
+    if GetBlockedCount() >= 5 then return end
 
-        -- Request data update
-        if RequestBattlefieldScoreData then
-            RequestBattlefieldScoreData()
-        end
+    local now = GetTime()
+    if (now - lastScoreScan < 2.0) then return end
+    lastScoreScan = now
 
+    pcall(function()
+        -- RequestBattlefieldScoreData()는 절대 호출하지 않음 (무한 이벤트 루프 및 시스템 메시지 스팸 방지)
         local numScores = GetNumScores()
         for i = 1, numScores do
             local scoreInfo = C_PvP.GetScoreInfo(i)
             if scoreInfo and scoreInfo.name then
                 TryBlockPlayer(scoreInfo.name, scoreInfo.guid)
+                if GetBlockedCount() >= 5 then return end
             end
         end
     end)
@@ -293,14 +306,15 @@ local function OnEvent(self, event, ...)
             
             -- Try to block immediately and periodically (players might load in slowly)
             if SSBlockerDB and SSBlockerDB.enabled then
-                BlockFromGroup()
-                C_Timer.After(1, BlockFromGroup)
-                C_Timer.After(3, BlockFromGroup)
-                C_Timer.After(5, BlockFromGroup)
-                C_Timer.After(10, BlockFromGroup)
-                C_Timer.After(20, BlockFromGroup)
-                C_Timer.After(30, BlockFromGroup)
-                C_Timer.After(60, BlockFromGroup)
+                BlockFromGroup(true)
+                local checkTimes = { 1, 3, 5, 10, 20 }
+                for _, delay in ipairs(checkTimes) do
+                    C_Timer.After(delay, function()
+                        if inSoloShuffle and GetBlockedCount() < 5 then
+                            BlockFromGroup(true)
+                        end
+                    end)
+                end
             end
             
         elseif not isSoloShuffle and inSoloShuffle then
@@ -323,15 +337,15 @@ local function OnEvent(self, event, ...)
         end
         
     elseif event == "GROUP_ROSTER_UPDATE" or event == "ARENA_OPPONENT_UPDATE" or event == "ARENA_PREP_OPPONENT_SPECIALIZATIONS" then
-        if inSoloShuffle then
+        if inSoloShuffle and GetBlockedCount() < 5 then
             BlockFromGroup()
         end
     elseif event == "UPDATE_BATTLEFIELD_SCORE" then
-        if inSoloShuffle then
+        if inSoloShuffle and GetBlockedCount() < 5 then
             BlockFromScoreboard()
         end
     elseif event == "CHAT_MSG_SYSTEM" then
-        if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
+        if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled and GetBlockedCount() < 5 then
             local msg = ...
             if msg and not IsSecret(msg) and type(msg) == "string" then
                 pcall(function()
@@ -344,7 +358,7 @@ local function OnEvent(self, event, ...)
             end
         end
     elseif event == "CHAT_MSG_INSTANCE_CHAT" or event == "CHAT_MSG_INSTANCE_CHAT_LEADER" or event == "CHAT_MSG_PARTY" or event == "CHAT_MSG_PARTY_LEADER" or event == "CHAT_MSG_SAY" then
-        if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
+        if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled and GetBlockedCount() < 5 then
             local _, sender, _, _, _, _, _, _, _, _, _, guid = ...
             if sender and guid and not IsSecret(sender) and not IsSecret(guid) then
                 TryBlockPlayer(sender, guid)
@@ -352,6 +366,7 @@ local function OnEvent(self, event, ...)
         end
     end
 end
+
 
 toggleButton = CreateFrame("Button", "SSBlockerToggleButton", UIParent, "UIPanelButtonTemplate")
 toggleButton:SetSize(120, 30)
@@ -374,7 +389,7 @@ toggleButton:SetScript("OnClick", function()
     UpdateButtonState()
     if SSBlockerDB.enabled then
         Print("자동 차단이 활성화되었습니다.")
-        BlockFromGroup()
+        BlockFromGroup(true)
     else
         Print("자동 차단이 비활성화되었습니다. (기존 차단 해제)")
         UnblockAll()
@@ -479,7 +494,7 @@ SLASH_SSBLOCKER1 = "/ssb"
 SlashCmdList["SSBLOCKER"] = function(msg)
     if msg == "test" then
         Print("테스트: 현재 그룹 및 아레나 대상을 기반으로 차단을 시도합니다.")
-        BlockFromGroup()
+        BlockFromGroup(true)
     elseif msg == "unblock" then
         UnblockAll()
         if UpdateBlockListDisplay then UpdateBlockListDisplay() end

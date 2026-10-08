@@ -94,13 +94,35 @@ end
 local function UnblockAll()
     local count = 0
     local dict = GetBlockedDict()
+
+    -- 1) C_FriendList 목록을 직접 순회하여 dict에 포함된 대상이 있는지 확인 및 해제
+    if C_FriendList and C_FriendList.GetNumIgnores and C_FriendList.GetIgnoreName then
+        local numIgnores = C_FriendList.GetNumIgnores() or 0
+        for i = numIgnores, 1, -1 do
+            local ignoreName = C_FriendList.GetIgnoreName(i)
+            if ignoreName then
+                local cleanIgnore = ignoreName:gsub("%s+", "")
+                local nameOnly = cleanIgnore:match("([^-]+)") or cleanIgnore
+                if dict[cleanIgnore] or dict[nameOnly] or dict[cleanIgnore:lower()] or dict[nameOnly:lower()] then
+                    C_FriendList.DelIgnore(ignoreName)
+                    dict[cleanIgnore] = nil
+                    dict[nameOnly] = nil
+                    count = count + 1
+                end
+            end
+        end
+    end
+
+    -- 2) 남아있는 dict 항목들에 대해서도 DelIgnore 시도
     for name, _ in pairs(dict) do
         C_FriendList.DelIgnore(name)
         count = count + 1
     end
+
     if SSBlockerDB then
         wipe(SSBlockerDB.blockedDict)
         wipe(SSBlockerDB.blockedQueue)
+        SSBlockerDB.unblockTimestamp = nil
     end
     unblockTimer = nil
     if count > 0 then
@@ -202,7 +224,7 @@ local lastGroupScan = 0
 local function BlockFromGroup(force, isManualTest)
     if not inSoloShuffle and not isManualTest then return end
     if SSBlockerDB and SSBlockerDB.enabled == false and not isManualTest then return end
-    if not isManualTest and GetBlockedCount() >= 5 then return end
+    if not isManualTest and not force and GetBlockedCount() >= 5 then return end
 
     local now = GetTime()
     if not force and (now - lastGroupScan < 0.5) then return end
@@ -218,7 +240,7 @@ local function BlockFromGroup(force, isManualTest)
                     local guid = UnitGUID(unit)
                     if name then
                         TryBlockPlayer(name, guid, isManualTest)
-                        if not isManualTest and GetBlockedCount() >= 5 then return end
+                        if not isManualTest and not force and GetBlockedCount() >= 5 then return end
                     end
                 end
             end
@@ -231,7 +253,7 @@ local function BlockFromGroup(force, isManualTest)
                     local guid = UnitGUID(unit)
                     if name then
                         TryBlockPlayer(name, guid, isManualTest)
-                        if not isManualTest and GetBlockedCount() >= 5 then return end
+                        if not isManualTest and not force and GetBlockedCount() >= 5 then return end
                     end
                 end
             end
@@ -245,11 +267,37 @@ local function BlockFromGroup(force, isManualTest)
                 local guid = UnitGUID(unit)
                 if name then
                     TryBlockPlayer(name, guid, isManualTest)
-                    if not isManualTest and GetBlockedCount() >= 5 then return end
+                    if not isManualTest and not force and GetBlockedCount() >= 5 then return end
                 end
             end
         end
     end)
+end
+
+-- Auto-scan when party size becomes 3 (match/round setup)
+local prevPartyMembersCount = 0
+local function CheckPartyThreeMembers()
+    if not inSoloShuffle then return end
+    if SSBlockerDB and SSBlockerDB.enabled == false then return end
+
+    local currentCount = 0
+    if IsInRaid() then
+        currentCount = GetNumGroupMembers()
+    else
+        currentCount = GetNumSubgroupMembers() + 1
+    end
+
+    if currentCount == 3 and prevPartyMembersCount ~= 3 then
+        Print("파티원 3명 구성 확인. 자동 차단 스캔을 즉시 실행합니다.")
+        BlockFromGroup(true)
+        C_Timer.After(0.5, function()
+            if inSoloShuffle then BlockFromGroup(true) end
+        end)
+        C_Timer.After(1.5, function()
+            if inSoloShuffle then BlockFromGroup(true) end
+        end)
+    end
+    prevPartyMembersCount = currentCount
 end
 
 -- Block using scoreboard (fallback, works at match end)
@@ -324,6 +372,10 @@ local function UpdateSoloShuffleState()
         inSoloShuffle = false
         UpdateButtonVisibility()
         local delayMinutes = SSBlockerDB and SSBlockerDB.unblockDelay or 5
+        local targetTimestamp = time() + (delayMinutes * 60)
+        if SSBlockerDB then
+            SSBlockerDB.unblockTimestamp = targetTimestamp
+        end
         Print("솔로 셔플 종료. " .. delayMinutes .. "분 뒤 차단 목록이 초기화됩니다.")
         
         if unblockTimer then unblockTimer:Cancel() end
@@ -356,19 +408,34 @@ local function OnEvent(self, event, ...)
         if not CheckSoloShuffle() and not inSoloShuffle and event == "PLAYER_ENTERING_WORLD" then
             local dict = GetBlockedDict()
             if next(dict) ~= nil then
-                Print("접속 전 해제되지 않은 임시 차단 플레이어가 있습니다. " .. (SSBlockerDB and SSBlockerDB.unblockDelay or 5) .. "분 뒤 해제됩니다.")
-                local delayMinutes = SSBlockerDB and SSBlockerDB.unblockDelay or 5
-                if unblockTimer then unblockTimer:Cancel() end
-                unblockTimer = C_Timer.NewTimer(delayMinutes * 60, UnblockAll)
+                local targetTimestamp = SSBlockerDB and SSBlockerDB.unblockTimestamp or 0
+                local now = time()
+                local remaining = targetTimestamp - now
+                if targetTimestamp == 0 or remaining <= 0 then
+                    Print("접속 전 대기 시간이 지났습니다. 차단된 임시 플레이어를 즉시 해제합니다.")
+                    C_Timer.After(2.0, UnblockAll)
+                else
+                    local remainingMin = math.ceil(remaining / 60)
+                    Print("접속 전 해제되지 않은 임시 차단 플레이어가 있습니다. 약 " .. remainingMin .. "분 뒤 해제됩니다.")
+                    if unblockTimer then unblockTimer:Cancel() end
+                    unblockTimer = C_Timer.NewTimer(remaining, UnblockAll)
+                end
             end
+        end
+
+        if inSoloShuffle then
+            CheckPartyThreeMembers()
         end
         
     elseif event == "GROUP_ROSTER_UPDATE" or event == "ARENA_OPPONENT_UPDATE" or event == "ARENA_PREP_OPPONENT_SPECIALIZATIONS" then
         if not inSoloShuffle then
             UpdateSoloShuffleState()
         end
-        if inSoloShuffle and GetBlockedCount() < 5 then
-            BlockFromGroup()
+        if inSoloShuffle then
+            CheckPartyThreeMembers()
+            if GetBlockedCount() < 5 then
+                BlockFromGroup()
+            end
         end
     elseif event == "UPDATE_BATTLEFIELD_SCORE" then
         if not inSoloShuffle then
@@ -381,7 +448,7 @@ local function OnEvent(self, event, ...)
         if not inSoloShuffle then
             UpdateSoloShuffleState()
         end
-        if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled and GetBlockedCount() < 5 then
+        if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
             local msg = ...
             if msg and not IsSecret(msg) and type(msg) == "string" then
                 pcall(function()
@@ -397,10 +464,18 @@ local function OnEvent(self, event, ...)
         if not inSoloShuffle then
             UpdateSoloShuffleState()
         end
-        if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled and GetBlockedCount() < 5 then
+        if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
             local _, sender, _, _, _, _, _, _, _, _, _, guid = ...
             if sender and not IsSecret(sender) then
                 TryBlockPlayer(sender, guid)
+            end
+        end
+    elseif event == "PLAYER_LOGOUT" then
+        local dict = GetBlockedDict()
+        if next(dict) ~= nil and SSBlockerDB then
+            if not SSBlockerDB.unblockTimestamp or SSBlockerDB.unblockTimestamp < time() then
+                local delayMinutes = SSBlockerDB.unblockDelay or 5
+                SSBlockerDB.unblockTimestamp = time() + (delayMinutes * 60)
             end
         end
     end
@@ -579,4 +654,5 @@ frame:RegisterEvent("CHAT_MSG_INSTANCE_CHAT_LEADER")
 frame:RegisterEvent("CHAT_MSG_PARTY")
 frame:RegisterEvent("CHAT_MSG_PARTY_LEADER")
 frame:RegisterEvent("CHAT_MSG_SAY")
+frame:RegisterEvent("PLAYER_LOGOUT")
 frame:SetScript("OnEvent", OnEvent)

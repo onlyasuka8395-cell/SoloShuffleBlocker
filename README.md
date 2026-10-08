@@ -1,5 +1,29 @@
 # Solo Shuffle Blocker (솔로 셔플 블로커)
 
+## 1.13 동작 안정성 수정
+
+* 차단 API가 실제 성공을 반환한 대상만 임시 차단으로 기록합니다.
+* 수동 해제와 새 경기 진입 시 이전 해제 타이머를 취소합니다.
+* 서버명을 포함한 이름으로 추적하여 다른 서버의 동명이인 영구 차단을 보호합니다.
+* 경기 중 재접속/리로드 시 기존 임시 차단을 유지합니다.
+* 길드 목록 수신 후 자동으로 다시 확인하고, 경기 중에는 2초마다 늦게 로딩된 플레이어를 재확인합니다.
+* 해제에 실패하면 추적 정보를 보존하고 안내합니다. `/ssb unblock`으로 재시도할 수 있습니다.
+* `/ssb test`로 추가한 임시 차단에도 경기 밖에서 자동 해제 시간을 적용합니다.
+
+### 검증 및 게임 내 확인
+
+`lua tests/regression.lua`로 모의 WoW API 기반 회귀 테스트를 실행할 수 있습니다(Lua 5.1 이상).
+실제 WoW 클라이언트의 API 접근 제한과 서버 응답은 모의 테스트에서 재현하지 못합니다.
+전투 중 이름/GUID가 비공개 값이면 해당 대상은 건너뛰고 다음 스캔에서 다시 확인하므로,
+경기 시작 즉시 상대 5명 모두의 차단을 보장하지는 않습니다.
+
+설치 후 `/ssb status`로 인식 상태를 확인하고, 필요하면 `/ssb debug`로 API 오류를 확인하세요.
+셔플 진입·라운드 변경·퇴장 후 자동 해제와 경기 중 `/reload`를 실제 게임에서 확인해야 합니다.
+`/ssb test`는 현재 파티원을 실제로 차단하므로 단순 상태 확인에는 `/ssb status`를 사용하세요.
+
+API 확인 근거: [Blizzard FriendList API 정의](https://github.com/Gethe/wow-ui-source/blob/live/Interface/AddOns/Blizzard_APIDocumentationGenerated/FriendListDocumentation.lua),
+[Blizzard PvP API 정의](https://github.com/Gethe/wow-ui-source/blob/live/Interface/AddOns/Blizzard_APIDocumentationGenerated/PvpInfoDocumentation.lua).
+
 월드 오브 워크래프트에서 평점제 1인 조합전(솔로 셔플)을 플레이할 때, 같은 매치에 잡힌 다른 플레이어들과의 불필요한 채팅이나 불편한 대화를 사전에 차단하기 위해 만들어진 자동 차단 관리 애드온입니다.
 
 ## 🌟 주요 기능

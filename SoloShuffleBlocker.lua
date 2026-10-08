@@ -7,15 +7,30 @@ local isTestMode = false
 local optionsPanel
 local UpdateBlockListDisplay
 local toggleButton
+local scanTicker
 
 local function IsSecret(val)
-    if val == nil then return false end
     if canaccessvalue then
         return not canaccessvalue(val)
     elseif issecretvalue then
         return issecretvalue(val)
     end
     return false
+end
+
+-- Keep the realm in every identity, including same-realm names.
+local function FullName(name)
+    if IsSecret(name) or type(name) ~= "string" or name == "" then return nil end
+    name = name:gsub("%s+", "")
+    if not name:find("-", 1, true) then
+        name = name .. "-" .. GetRealmName():gsub("%s+", "")
+    end
+    return name
+end
+
+local function CancelUnblockTimer()
+    if unblockTimer then unblockTimer:Cancel() end
+    unblockTimer = nil
 end
 
 local function UpdateButtonVisibility()
@@ -62,7 +77,7 @@ end
 local function GetNumScores()
     if GetNumBattlefieldScores then
         local count = GetNumBattlefieldScores()
-        if count and count > 0 then return count end
+        if not IsSecret(count) and count and count > 0 then return count end
     end
     -- Fallback: Solo Shuffle has up to 6 players, safe to check up to 6 without infinite loop
     return 6
@@ -73,16 +88,43 @@ local function Print(msg)
     print("|cFF00FF00[SSBlocker]|r " .. msg)
 end
 
+local function SafeCall(fn, ...)
+    local ok, result = pcall(fn, ...)
+    if not ok and SSBlockerDB.debug then
+        Print("API 오류: " .. tostring(result))
+    end
+    return ok, result
+end
+
+-- A failed API call must not discard ownership of a temporary ignore.
+local function RemoveTracked(name)
+    local ok, removed = SafeCall(C_FriendList.DelIgnore, name)
+    if ok and removed == true then
+        GetBlockedDict()[name] = nil
+        return true
+    end
+    local checked, ignored = SafeCall(C_FriendList.IsIgnored, name)
+    if checked and ignored == false then
+        GetBlockedDict()[name] = nil
+        return true
+    end
+    return false
+end
+
 local function UnblockOldest(count)
     local queue = GetBlockedQueue()
     local dict = GetBlockedDict()
     local unblocked = 0
-    while unblocked < count and #queue > 0 do
-        local oldestName = table.remove(queue, 1)
-        if dict[oldestName] then
-            C_FriendList.DelIgnore(oldestName)
-            dict[oldestName] = nil
+    local index = 1
+    while unblocked < count and index <= #queue do
+        local oldestName = queue[index]
+        if not dict[oldestName] then
+            table.remove(queue, index)
+        elseif RemoveTracked(oldestName) then
+            table.remove(queue, index)
             unblocked = unblocked + 1
+        else
+            index = index + 1
         end
     end
     if unblocked > 0 then
@@ -92,39 +134,24 @@ end
 
 -- Function to unblock players tracked by this addon
 local function UnblockAll()
+    CancelUnblockTimer()
     local count = 0
     local dict = GetBlockedDict()
-
-    -- 1) C_FriendList 목록을 직접 순회하여 dict에 포함된 대상이 있는지 확인 및 해제
-    if C_FriendList and C_FriendList.GetNumIgnores and C_FriendList.GetIgnoreName then
-        local numIgnores = C_FriendList.GetNumIgnores() or 0
-        for i = numIgnores, 1, -1 do
-            local ignoreName = C_FriendList.GetIgnoreName(i)
-            if ignoreName then
-                local cleanIgnore = ignoreName:gsub("%s+", "")
-                local nameOnly = cleanIgnore:match("([^-]+)") or cleanIgnore
-                if dict[cleanIgnore] or dict[nameOnly] or dict[cleanIgnore:lower()] or dict[nameOnly:lower()] then
-                    C_FriendList.DelIgnore(ignoreName)
-                    dict[cleanIgnore] = nil
-                    dict[nameOnly] = nil
-                    count = count + 1
-                end
-            end
-        end
+    for name in pairs(dict) do
+        if RemoveTracked(name) then count = count + 1 end
     end
-
-    -- 2) 남아있는 dict 항목들에 대해서도 DelIgnore 시도
-    for name, _ in pairs(dict) do
-        C_FriendList.DelIgnore(name)
-        count = count + 1
+    local queue = GetBlockedQueue()
+    for i = #queue, 1, -1 do
+        if not dict[queue[i]] then table.remove(queue, i) end
     end
-
-    if SSBlockerDB then
-        wipe(SSBlockerDB.blockedDict)
-        wipe(SSBlockerDB.blockedQueue)
+    if next(dict) == nil then
         SSBlockerDB.unblockTimestamp = nil
+    else
+        -- Keep failed removals for a later retry/relogin.
+        SSBlockerDB.unblockTimestamp = time()
+        Print("일부 임시 차단을 해제하지 못했습니다. /ssb unblock으로 다시 시도할 수 있습니다.")
     end
-    unblockTimer = nil
+    if UpdateBlockListDisplay then UpdateBlockListDisplay() end
     if count > 0 then
         Print(count .. "명의 플레이어를 차단 해제했습니다.")
     end
@@ -132,56 +159,57 @@ end
 
 -- Helper to check if a unit (by GUID) is in the player's guild
 local guildMemberGuids = {}
+local guildMemberNames = {}
+local guildCacheReady = false
 
 local function UpdateGuildCache()
     wipe(guildMemberGuids)
-    if not IsInGuild() then return end
-    
-    -- Request latest roster (async, but we do our best)
-    C_GuildInfo.GuildRoster()
+    wipe(guildMemberNames)
+    guildCacheReady = not IsInGuild()
+    if guildCacheReady then return end
     
     local numMembers = GetNumGuildMembers()
+    guildCacheReady = numMembers > 0
     for i = 1, numMembers do
         local name, _, _, _, _, _, _, _, online, _, _, _, _, _, _, _, guid = GetGuildRosterInfo(i)
-        if guid and not IsSecret(guid) then
+        if not IsSecret(guid) and guid then
             guildMemberGuids[guid] = true
         end
+        local fullName = FullName(name)
+        if fullName then guildMemberNames[fullName:lower()] = true end
     end
 end
 
 local function IsSameGuild(targetGuid)
-    if not targetGuid or IsSecret(targetGuid) then return false end
+    if IsSecret(targetGuid) or not targetGuid then return false end
     return guildMemberGuids[targetGuid]
 end
 
 -- Helper to attempt blocking a single player by name and guid
 local function TryBlockPlayer(name, guid, isManualTest)
-    if not name or name == "" or name == UNKNOWN or name == "Unknown" or name == "알 수 없음" then return false end
     if IsSecret(name) then return false end
+    if not name or name == "" or name == UNKNOWN or name == "Unknown" or name == "알 수 없음" then return false end
     if not inSoloShuffle and not isManualTest then return false end
     if SSBlockerDB and SSBlockerDB.enabled == false and not isManualTest then return false end
 
-    local cleanName = tostring(name):gsub("%s+", "")
-    if cleanName == "" then return false end
+    local cleanName = FullName(name)
+    if not cleanName then return false end
 
     local dict = GetBlockedDict()
-    if dict[cleanName] then return false end -- Already tracked by us
+    for tracked in pairs(dict) do
+        if tracked:lower() == cleanName:lower() then return false end
+    end
 
     local myName, myRealm = UnitName("player")
     if not myRealm or myRealm == "" then myRealm = GetRealmName() end
     
-    -- Remove spaces and dashes from realm name for consistent comparison
-    local cleanMyRealm = myRealm and myRealm:gsub("[%s%-]+", "") or ""
-    local myFullName = (myName .. "-" .. cleanMyRealm):lower()
+    local myFullName = FullName(myName .. "-" .. myRealm):lower()
+    if cleanName:lower() == myFullName then return false end
+    if not guildCacheReady or guildMemberNames[cleanName:lower()] then return false end
 
-    local targetFullName = cleanName:gsub("[%s%-]+", "-"):lower()
-    local targetNameOnly = cleanName:match("([^-]+)") or cleanName
-    targetNameOnly = targetNameOnly:lower()
-
-    if targetNameOnly == myName:lower() or targetFullName == myFullName then return false end
-
-    -- Ensure we only block players (skip pets/NPCs) if guid is available and accessible
-    if guid and not IsSecret(guid) then
+    -- Defer identities we cannot inspect; a later roster scan can retry safely.
+    if IsSecret(guid) or not guid then return false end
+    if guid then
         if not string.match(guid, "^Player%-") then return false end
         -- Check if guild member
         if IsSameGuild(guid) then return false end
@@ -197,11 +225,9 @@ local function TryBlockPlayer(name, guid, isManualTest)
         UnblockOldest(6)
     end
 
-    local ok, err = pcall(function()
-        C_FriendList.AddIgnore(cleanName)
-    end)
+    local ok, added = SafeCall(C_FriendList.AddIgnore, cleanName)
 
-    if ok then
+    if ok and added == true then
         local queue = GetBlockedQueue()
         dict[cleanName] = true
         table.insert(queue, cleanName)
@@ -213,7 +239,7 @@ local function TryBlockPlayer(name, guid, isManualTest)
         return true
     else
         if SSBlockerDB and SSBlockerDB.debug then
-            Print("차단 실패 (" .. cleanName .. "): " .. tostring(err))
+            Print("차단 실패 (" .. cleanName .. "): " .. tostring(added))
         end
         return false
     end
@@ -230,7 +256,7 @@ local function BlockFromGroup(force, isManualTest)
     if not force and (now - lastGroupScan < 0.5) then return end
     lastGroupScan = now
 
-    pcall(function()
+    SafeCall(function()
         if IsInRaid() then
             local numGroup = GetNumGroupMembers()
             for i = 1, numGroup do
@@ -238,8 +264,8 @@ local function BlockFromGroup(force, isManualTest)
                 if UnitExists(unit) and not UnitIsUnit(unit, "player") then
                     local name = GetUnitName(unit, true)
                     local guid = UnitGUID(unit)
-                    if name then
-                        TryBlockPlayer(name, guid, isManualTest)
+                    if not IsSecret(name) and name then
+                        SafeCall(TryBlockPlayer, name, guid, isManualTest)
                         if not isManualTest and not force and GetBlockedCount() >= 5 then return end
                     end
                 end
@@ -251,8 +277,8 @@ local function BlockFromGroup(force, isManualTest)
                 if UnitExists(unit) then
                     local name = GetUnitName(unit, true)
                     local guid = UnitGUID(unit)
-                    if name then
-                        TryBlockPlayer(name, guid, isManualTest)
+                    if not IsSecret(name) and name then
+                        SafeCall(TryBlockPlayer, name, guid, isManualTest)
                         if not isManualTest and not force and GetBlockedCount() >= 5 then return end
                     end
                 end
@@ -265,8 +291,8 @@ local function BlockFromGroup(force, isManualTest)
             if UnitExists(unit) then
                 local name = GetUnitName(unit, true)
                 local guid = UnitGUID(unit)
-                if name then
-                    TryBlockPlayer(name, guid, isManualTest)
+                if not IsSecret(name) and name then
+                    SafeCall(TryBlockPlayer, name, guid, isManualTest)
                     if not isManualTest and not force and GetBlockedCount() >= 5 then return end
                 end
             end
@@ -311,12 +337,12 @@ local function BlockFromScoreboard(isManualTest)
     if (now - lastScoreScan < 2.0) then return end
     lastScoreScan = now
 
-    pcall(function()
+    SafeCall(function()
         local numScores = GetNumScores()
         for i = 1, numScores do
             local scoreInfo = C_PvP.GetScoreInfo(i)
-            if scoreInfo and scoreInfo.name then
-                TryBlockPlayer(scoreInfo.name, scoreInfo.guid, isManualTest)
+            if not IsSecret(scoreInfo) and scoreInfo then
+                SafeCall(TryBlockPlayer, scoreInfo.name, scoreInfo.guid, isManualTest)
                 if not isManualTest and GetBlockedCount() >= 5 then return end
             end
         end
@@ -341,35 +367,40 @@ local function UpdateSoloShuffleState()
     if isSoloShuffle and not inSoloShuffle then
         -- ENTERING Solo Shuffle
         inSoloShuffle = true
+        prevPartyMembersCount = 0
+        lastGroupScan = -math.huge
+        lastScoreScan = -math.huge
         UpdateButtonVisibility()
         
         -- If we have a pending unblock timer or old blocks, clear them now to start fresh
-        if unblockTimer then
-            unblockTimer:Cancel()
-            unblockTimer = nil
-        end
-        UnblockAll() -- Clear previous game's blocks immediately to free up space/reset
+        CancelUnblockTimer()
+        -- A reload/reconnect inside the same match must retain its ignores.
+        if not SSBlockerDB.wasInSoloShuffle then UnblockAll() end
+        SSBlockerDB.wasInSoloShuffle = true
+        SSBlockerDB.unblockTimestamp = nil
         
         Print("솔로 셔플 진입 확인. 플레이어 차단을 시작합니다.")
         
         UpdateGuildCache() -- Cache guild members to avoid blocking them
+        if IsInGuild() then C_GuildInfo.GuildRoster() end
+        if scanTicker then scanTicker:Cancel() end
+        scanTicker = C_Timer.NewTicker(2, function()
+            if inSoloShuffle and SSBlockerDB.enabled then
+                BlockFromGroup(true)
+                BlockFromScoreboard()
+            end
+        end)
         
-        -- Try to block immediately and periodically (players might load in slowly)
+        -- The ticker also covers late loads and later rounds.
         if SSBlockerDB and SSBlockerDB.enabled then
             BlockFromGroup(true)
-            local checkTimes = { 1, 2, 3, 5, 8, 12, 20 }
-            for _, delay in ipairs(checkTimes) do
-                C_Timer.After(delay, function()
-                    if inSoloShuffle and GetBlockedCount() < 5 then
-                        BlockFromGroup(true)
-                    end
-                end)
-            end
         end
         
     elseif not isSoloShuffle and inSoloShuffle then
         -- LEAVING Solo Shuffle
         inSoloShuffle = false
+        SSBlockerDB.wasInSoloShuffle = false
+        if scanTicker then scanTicker:Cancel(); scanTicker = nil end
         UpdateButtonVisibility()
         local delayMinutes = SSBlockerDB and SSBlockerDB.unblockDelay or 5
         local targetTimestamp = time() + (delayMinutes * 60)
@@ -390,6 +421,23 @@ local function OnEvent(self, event, ...)
             SSBlockerDB = SSBlockerDB or { unblockDelay = 5 }
             SSBlockerDB.blockedDict = SSBlockerDB.blockedDict or {}
             SSBlockerDB.blockedQueue = SSBlockerDB.blockedQueue or {}
+            SSBlockerDB.unblockDelay = math.max(1, math.min(60, tonumber(SSBlockerDB.unblockDelay) or 5))
+            -- Migrate old unqualified keys without conflating other realms.
+            local migrated, queue = {}, {}
+            local function MigrateName(name)
+                local fullName = FullName(name)
+                if fullName and not migrated[fullName:lower()] then
+                    migrated[fullName:lower()] = fullName
+                    table.insert(queue, fullName)
+                end
+            end
+            for _, name in ipairs(SSBlockerDB.blockedQueue) do
+                if SSBlockerDB.blockedDict[name] then MigrateName(name) end
+            end
+            for name in pairs(SSBlockerDB.blockedDict) do MigrateName(name) end
+            wipe(SSBlockerDB.blockedDict)
+            for _, name in ipairs(queue) do SSBlockerDB.blockedDict[name] = true end
+            SSBlockerDB.blockedQueue = queue
             if SSBlockerDB.enabled == nil then SSBlockerDB.enabled = true end
             
             if toggleButton then
@@ -406,6 +454,7 @@ local function OnEvent(self, event, ...)
         UpdateSoloShuffleState()
         
         if not CheckSoloShuffle() and not inSoloShuffle and event == "PLAYER_ENTERING_WORLD" then
+            SSBlockerDB.wasInSoloShuffle = false
             local dict = GetBlockedDict()
             if next(dict) ~= nil then
                 local targetTimestamp = SSBlockerDB and SSBlockerDB.unblockTimestamp or 0
@@ -413,7 +462,10 @@ local function OnEvent(self, event, ...)
                 local remaining = targetTimestamp - now
                 if targetTimestamp == 0 or remaining <= 0 then
                     Print("접속 전 대기 시간이 지났습니다. 차단된 임시 플레이어를 즉시 해제합니다.")
-                    C_Timer.After(2.0, UnblockAll)
+                    CancelUnblockTimer()
+                    unblockTimer = C_Timer.NewTimer(2.0, function()
+                        if not inSoloShuffle then UnblockAll() end
+                    end)
                 else
                     local remainingMin = math.ceil(remaining / 60)
                     Print("접속 전 해제되지 않은 임시 차단 플레이어가 있습니다. 약 " .. remainingMin .. "분 뒤 해제됩니다.")
@@ -444,36 +496,24 @@ local function OnEvent(self, event, ...)
         if inSoloShuffle and GetBlockedCount() < 5 then
             BlockFromScoreboard()
         end
-    elseif event == "CHAT_MSG_SYSTEM" then
-        if not inSoloShuffle then
-            UpdateSoloShuffleState()
-        end
-        if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
-            local msg = ...
-            if msg and not IsSecret(msg) and type(msg) == "string" then
-                pcall(function()
-                    local name = msg:match("^([^%s]+).*님이.*합류")
-                    if name and not IsSecret(name) then
-                        name = name:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
-                        TryBlockPlayer(name, nil)
-                    end
-                end)
-            end
-        end
+    elseif event == "GUILD_ROSTER_UPDATE" or event == "PLAYER_GUILD_UPDATE" then
+        UpdateGuildCache()
+        if event == "PLAYER_GUILD_UPDATE" and IsInGuild() then C_GuildInfo.GuildRoster() end
+        if inSoloShuffle then BlockFromGroup(true) end
     elseif event == "CHAT_MSG_INSTANCE_CHAT" or event == "CHAT_MSG_INSTANCE_CHAT_LEADER" or event == "CHAT_MSG_PARTY" or event == "CHAT_MSG_PARTY_LEADER" or event == "CHAT_MSG_SAY" then
         if not inSoloShuffle then
             UpdateSoloShuffleState()
         end
         if inSoloShuffle and SSBlockerDB and SSBlockerDB.enabled then
             local _, sender, _, _, _, _, _, _, _, _, _, guid = ...
-            if sender and not IsSecret(sender) then
-                TryBlockPlayer(sender, guid)
+            if not IsSecret(sender) and sender then
+                SafeCall(TryBlockPlayer, sender, guid)
             end
         end
     elseif event == "PLAYER_LOGOUT" then
         local dict = GetBlockedDict()
         if next(dict) ~= nil and SSBlockerDB then
-            if not SSBlockerDB.unblockTimestamp or SSBlockerDB.unblockTimestamp < time() then
+            if not SSBlockerDB.unblockTimestamp then
                 local delayMinutes = SSBlockerDB.unblockDelay or 5
                 SSBlockerDB.unblockTimestamp = time() + (delayMinutes * 60)
             end
@@ -608,8 +648,15 @@ SLASH_SSBLOCKER1 = "/ssb"
 SlashCmdList["SSBLOCKER"] = function(msg)
     local cmd = msg and msg:lower():match("^%s*(%S+)")
     if cmd == "test" then
+        UpdateGuildCache()
+        if IsInGuild() then C_GuildInfo.GuildRoster() end
         Print("테스트: 현재 그룹 및 아레나 대상을 기반으로 차단을 시도합니다 (솔로셔플 여부 무관).")
         BlockFromGroup(true, true)
+        if not inSoloShuffle and next(GetBlockedDict()) then
+            CancelUnblockTimer()
+            SSBlockerDB.unblockTimestamp = time() + SSBlockerDB.unblockDelay * 60
+            unblockTimer = C_Timer.NewTimer(SSBlockerDB.unblockDelay * 60, UnblockAll)
+        end
     elseif cmd == "status" then
         local isSS1 = C_PvP and C_PvP.IsSoloShuffle and C_PvP.IsSoloShuffle()
         local isSS2 = C_PvP and C_PvP.IsRatedSoloShuffle and C_PvP.IsRatedSoloShuffle()
@@ -627,9 +674,9 @@ SlashCmdList["SSBLOCKER"] = function(msg)
     elseif cmd == "unblock" then
         UnblockAll()
         if UpdateBlockListDisplay then UpdateBlockListDisplay() end
-        Print("강제로 모든 임시 차단을 해제했습니다.")
+        if not next(GetBlockedDict()) then Print("모든 임시 차단을 해제했습니다.") end
     else
-        if Settings and Settings.OpenToCategory then
+        if category and Settings and Settings.OpenToCategory then
             Settings.OpenToCategory(category:GetID())
         else
             InterfaceOptionsFrame_OpenToCategory(optionsPanel)
@@ -648,7 +695,8 @@ frame:RegisterEvent("UPDATE_BATTLEFIELD_SCORE")
 frame:RegisterEvent("GROUP_ROSTER_UPDATE")
 frame:RegisterEvent("ARENA_OPPONENT_UPDATE")
 frame:RegisterEvent("ARENA_PREP_OPPONENT_SPECIALIZATIONS")
-frame:RegisterEvent("CHAT_MSG_SYSTEM")
+frame:RegisterEvent("GUILD_ROSTER_UPDATE")
+frame:RegisterEvent("PLAYER_GUILD_UPDATE")
 frame:RegisterEvent("CHAT_MSG_INSTANCE_CHAT")
 frame:RegisterEvent("CHAT_MSG_INSTANCE_CHAT_LEADER")
 frame:RegisterEvent("CHAT_MSG_PARTY")
